@@ -93,4 +93,4 @@ import { BomSchema as BomSchema17 } from "@cdxgen/cdx-proto/v1.7";
 
 ## License
 
-Apache-2.0
+MIT
