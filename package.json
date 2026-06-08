@@ -1,6 +1,6 @@
 {
   "name": "@cdxgen/cdx-proto",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Library to serialize/deserialize CycloneDX BOM with protocol buffers",
   "type": "module",
   "exports": {
