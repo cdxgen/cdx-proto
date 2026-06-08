@@ -1,6 +1,6 @@
 {
-  "name": "@appthreat/cdx-proto",
-  "version": "2.0.1",
+  "name": "@cdxgen/cdx-proto",
+  "version": "2.0.2",
   "description": "Library to serialize/deserialize CycloneDX BOM with protocol buffers",
   "type": "module",
   "exports": {
@@ -27,10 +27,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AppThreat/cdx-proto.git"
+    "url": "git+https://github.com/cdxgen/cdx-proto.git"
   },
   "bugs": {
-    "url": "https://github.com/AppThreat/cdx-proto/issues"
+    "url": "https://github.com/cdxgen/cdx-proto/issues"
   },
   "scripts": {
     "lint": "tsc --noEmit",
@@ -66,12 +66,12 @@
     "protobom"
   ],
   "author": "Team AppThreat <cloud@appthreat.com>",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "dependencies": {
     "@bufbuild/protobuf": "2.12.0"
   },
   "devDependencies": {
-    "@bufbuild/buf": "1.69.0",
+    "@bufbuild/buf": "1.70.0",
     "@bufbuild/protoc-gen-es": "2.12.0",
     "typedoc": "^0.28.19",
     "typescript": "^6.0.3",

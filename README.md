@@ -4,7 +4,7 @@ Runtime library to serialize/deserialize CycloneDX BOM with protocol buffers. Th
 
 ## 2.0.0 highlights
 
-- version-specific subpath exports: `@appthreat/cdx-proto/v1.5`, `v1.6`, and `v1.7`
+- version-specific subpath exports: `@cdxgen/cdx-proto/v1.5`, `v1.6`, and `v1.7`
 - helper APIs for schema selection and BOM encode/decode workflows
 - leaner npm package contents that no longer publish generated `docs/`
 
@@ -18,8 +18,8 @@ import {
   encodeBomJson,
   getBomSchema,
   parseBomJson,
-} from "@appthreat/cdx-proto";
-import { BomSchema as BomSchema16 } from "@appthreat/cdx-proto/v1.6";
+} from "@cdxgen/cdx-proto";
+import { BomSchema as BomSchema16 } from "@cdxgen/cdx-proto/v1.6";
 import { fromJson } from "@bufbuild/protobuf";
 
 // Use version-specific entrypoints when you only need one schema version.
@@ -86,9 +86,9 @@ In short: if you provide canonical CycloneDX JSON to the helper API, you should 
 Use subpath exports to avoid loading schema versions you do not need:
 
 ```js
-import { BomSchema as BomSchema15 } from "@appthreat/cdx-proto/v1.5";
-import { BomSchema as BomSchema16 } from "@appthreat/cdx-proto/v1.6";
-import { BomSchema as BomSchema17 } from "@appthreat/cdx-proto/v1.7";
+import { BomSchema as BomSchema15 } from "@cdxgen/cdx-proto/v1.5";
+import { BomSchema as BomSchema16 } from "@cdxgen/cdx-proto/v1.6";
+import { BomSchema as BomSchema17 } from "@cdxgen/cdx-proto/v1.7";
 ```
 
 ## License
