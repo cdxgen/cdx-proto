@@ -74,6 +74,86 @@ test("createBom populates specVersion and round-trips binary/json", () => {
   assert.equal(reparsedFromString.version, 3);
 });
 
+test("CycloneDX 1.7 citations round-trip through json and binary", () => {
+  // Citations are a root-level 1.7 element. The canonical JSON form carries
+  // `pointers`/`expressions` as bare string arrays and uses camelCase/hyphen
+  // field names, while the protobuf nests those arrays inside wrapper messages.
+  // Both shapes must survive a json round-trip and a binary round-trip.
+  const citations = [
+    {
+      timestamp: "2026-01-01T00:00:00.000Z",
+      pointers: ["/components/0/licenses/0"],
+      attributedTo: "pkg:npm/@cdxgen/cdxgen@1.0.0",
+      "bom-ref": "citation:licenses",
+      note: "resolved by cdxgen",
+    },
+    {
+      timestamp: "2026-01-02T00:00:00.000Z",
+      expressions: ["$.components[*].properties[?(@.name =~ /^cdx:audit:/)]"],
+      process: "urn:cdx:formula:audit",
+    },
+  ];
+
+  const jsonRoundTrip = roundTripBom("1.7", { citations });
+  assert.deepEqual(jsonRoundTrip.citations, [
+    {
+      timestamp: "2026-01-01T00:00:00Z",
+      pointers: ["/components/0/licenses/0"],
+      attributedTo: "pkg:npm/@cdxgen/cdxgen@1.0.0",
+      "bom-ref": "citation:licenses",
+      note: "resolved by cdxgen",
+    },
+    {
+      timestamp: "2026-01-02T00:00:00Z",
+      expressions: [
+        "$.components[*].properties[?(@.name =~ /^cdx:audit:/)]",
+      ],
+      process: "urn:cdx:formula:audit",
+    },
+  ]);
+
+  // Binary round-trip must preserve the same canonical shape.
+  const parsed = parseBomJson(
+    {
+      bomFormat: "CycloneDX",
+      specVersion: "1.7",
+      version: 1,
+      serialNumber: "urn:uuid:44444444-4444-4444-4444-444444444444",
+      citations,
+    },
+    { ignoreUnknownFields: true },
+  );
+  const fromBinary = parseBomBinary(encodeBomBinary(parsed));
+  const binaryRoundTrip = encodeBomJson(fromBinary);
+  assert.equal(binaryRoundTrip.citations.length, 2);
+  assert.deepEqual(binaryRoundTrip.citations[0].pointers, [
+    "/components/0/licenses/0",
+  ]);
+  assert.deepEqual(binaryRoundTrip.citations[1].expressions, [
+    "$.components[*].properties[?(@.name =~ /^cdx:audit:/)]",
+  ]);
+});
+
+test("an empty citation pointer list never becomes an object", () => {
+  // A wrapper message carrying no entries decodes to `{}`. Unwrapping that to
+  // the wrapper object would put an object where the CycloneDX schema requires
+  // an array, so the empty case must unwrap to an array or be dropped.
+  const roundTrip = roundTripBom("1.7", {
+    citations: [
+      {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        pointers: [],
+        attributedTo: "pkg:npm/@cdxgen/cdxgen@13.0.0",
+      },
+    ],
+  });
+  const [citation] = roundTrip.citations;
+  assert.ok(
+    citation.pointers === undefined || Array.isArray(citation.pointers),
+  );
+  assert.equal(citation.attributedTo, "pkg:npm/@cdxgen/cdxgen@13.0.0");
+});
+
 test("canonical CycloneDX JSON round-trips without protobuf enum leakage", () => {
   const bom = parseBomJson(
     {

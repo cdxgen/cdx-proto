@@ -216,6 +216,69 @@ function shouldWrapBomObjectListField(
   );
 }
 
+/**
+ * Detects a "scalar list wrapper" message: a message that exists only to carry
+ * a single `repeated string` field, such as `Citation.Pointers` (inner field
+ * `pointer`) and `Citation.Expressions` (inner field `expression`). In the
+ * canonical CycloneDX JSON these are represented as bare string arrays under
+ * the wrapper's plural key, whereas the protobuf representation nests the array
+ * inside the wrapper message. Returns the inner field descriptor when the
+ * message matches the shape, so callers can wrap/unwrap the value.
+ *
+ * The test is structural rather than a list of message names so it holds for
+ * every spec version without maintenance. Across all bundled specifications
+ * the only messages of this shape are `Citation.Pointers` and
+ * `Citation.Expressions`.
+ */
+function getScalarListWrapperInnerField(
+  messageDescriptor: MessageDescriptorLike,
+): FieldDescriptorLike | undefined {
+  if (messageDescriptor.fields.length !== 1) {
+    return undefined;
+  }
+  const [field] = messageDescriptor.fields;
+  if (
+    field !== undefined &&
+    field.fieldKind === "list" &&
+    field.listKind === "scalar"
+  ) {
+    return field;
+  }
+  return undefined;
+}
+
+/**
+ * Moves a scalar list between its two representations: a bare array in
+ * canonical CycloneDX JSON, and an array nested inside a wrapper message in
+ * protobuf. An absent or malformed wrapper unwraps to an empty array rather
+ * than to the wrapper object, so a round-trip never leaves an object where the
+ * CycloneDX schema requires an array.
+ */
+function transformScalarListWrapper(
+  messageDescriptor: MessageDescriptorLike,
+  value: JsonLike,
+  direction: NormalizationDirection,
+): JsonLike {
+  const innerField = getScalarListWrapperInnerField(messageDescriptor);
+  if (!innerField) {
+    return value;
+  }
+  if (direction === "toProto") {
+    const wrapped = Array.isArray(value)
+      ? ({ [innerField.jsonName]: value } as JsonRecord)
+      : value;
+    return transformMessageValue(messageDescriptor, wrapped, direction);
+  }
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (isJsonRecord(value)) {
+    const inner = value[innerField.jsonName];
+    return Array.isArray(inner) ? inner : [];
+  }
+  return value;
+}
+
 function mergeBomObjectListEntries(entries: JsonLike[]): JsonLike {
   const mergedEntry: JsonRecord = {};
   for (const entry of entries) {
@@ -482,6 +545,16 @@ function transformFieldValue(
     case "message":
       if (!fieldDescriptor.message) {
         return value;
+      }
+      // Scalar list wrappers (e.g. Citation.Pointers/Expressions) carry a bare
+      // string array in canonical JSON but nest it inside a message in proto.
+      // Wrap on the way in (toProto) and unwrap on the way out (fromProto).
+      if (getScalarListWrapperInnerField(fieldDescriptor.message)) {
+        return transformScalarListWrapper(
+          fieldDescriptor.message,
+          value,
+          direction,
+        );
       }
       return transformMessageValue(fieldDescriptor.message, value, direction);
     default:
