@@ -96,5 +96,9 @@
       "@typescript-eslint/promise-function-async": "off",
       "no-lone-blocks": "off"
     }
+  },
+  "allowScripts": {
+    "@bufbuild/buf@1.70.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }
