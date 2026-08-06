@@ -1,0 +1,28 @@
+tests/helpers.test.js
+  s_6936c3be6ae74d::t_ed95835fdc12bb 137-153,155-156
+  s_6936c3be6ae74d::t_a4ecfd1aba3637 154
+source/helpers.ts
+  s_6936c3be6ae74d::t_bcf99f61bb5302 250-281
+  s_6936c3be6ae74d::t_c0aa7af018705e 552-553,555-556
+  s_6936c3be6ae74d::t_590768fd449670 227-231
+package-lock.json
+  s_6936c3be6ae74d::t_ff983697e7c6ca 3,9
+package.json
+  s_6936c3be6ae74d::t_36bc33b16baee1 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ccdb0473bd6dd602aa08825879cabd74b64b5ae2",
+  "prompts": {},
+  "sessions": {
+    "s_6936c3be6ae74d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97e50470-9988-4542-a506-43e4d9a0f6e4",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Prabhu Subramanian <prabhu@appthreat.com>"
+    }
+  }
+}
