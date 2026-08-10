@@ -23,13 +23,15 @@ const versions = ["1.5", "1.6", "1.7"];
 // Each entry is a substring that, if present on a diff line, is treated as an
 // expected divergence.
 //
-// The vendored protos currently match the upstream `fix/proto-schema-bugs`
-// branch, which corrects six long-standing mismatches between the protobuf
-// schemas and the CycloneDX JSON schema/XSD they mirror: three 1.5 cardinality
-// errors, and three field names. Until that branch merges and ships, diffing
-// against upstream `master` reports those corrections as drift — so both
-// spellings of each are listed here in pairs. Delete a pair once the
-// corresponding fix is released upstream; the check tightens automatically.
+// The vendored protos carry six permanent local corrections for places where the
+// released CycloneDX protobuf schemas contradict their own JSON schema and XSD:
+// three 1.5 cardinality errors and three field names. These are ours and are not
+// expected to land upstream, so each is listed here in both spellings — the
+// released one and the corrected one — and the pairs stay. Each divergence is
+// also documented in a LOCAL PATCHES header at the top of the .proto file.
+//
+// Anything NOT in this list is real drift worth reviewing: an upstream field
+// added, removed, or changed since the last vendoring.
 const allowlist = [
   // 1.5 Component.evidence: single object per the 1.5 JSON schema and XSD
   "optional Evidence evidence = 23;",

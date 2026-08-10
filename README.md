@@ -86,8 +86,9 @@ The helper layer is designed to work with canonical CycloneDX JSON rather than p
 #### Corrected proto field names, and interop with tools that use the released ones
 
 Three fields are named differently in the released CycloneDX protobuf schemas
-than in the CycloneDX JSON schema they are supposed to mirror. Upstream has
-corrected all three, and the schemas vendored here use the corrected names:
+than in the CycloneDX JSON schema they are supposed to mirror. The schemas
+vendored here correct all three, so a protobuf BOM produced by this library uses
+the same names as its JSON counterpart:
 
 | version(s) | released proto name | corrected proto name | canonical JSON |
 | --- | --- | --- | --- |

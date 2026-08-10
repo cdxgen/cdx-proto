@@ -121,18 +121,20 @@ const MESSAGE_FIELD_ALIASES: Record<string, string> = {
  * they only widen what the decoder recognises.
  *
  * The three entries below are the field names used by the *released* CycloneDX
- * protobuf schemas, which disagree with their own JSON schema and XSD. Upstream
- * has since corrected them (`postalCodeue` -> `postalCode`,
- * `graphic` -> `collection`, `cryptoRef` -> `cryptoRefArray`) and the vendored
- * protos here carry the corrected names, so canonical output is now correct
- * without an alias. But protobuf-JSON produced by any tool generated from a
- * released spec still uses the old spellings, and dropping them would silently
- * discard those fields.
+ * protobuf schemas, which disagree with their own JSON schema and XSD. The
+ * vendored protos here carry corrected names (`postalCodeue` -> `postalCode`,
+ * `graphic` -> `collection`, `cryptoRef` -> `cryptoRefArray`) so that canonical
+ * output is right without an alias — see the LOCAL PATCHES header in each
+ * `specification/bom-*.proto`.
  *
- * Only the JSON *names* ever differed: every field number is unchanged, so the
- * binary wire format is identical in both directions and needs no compatibility
- * handling. Once the corrected schemas have been released long enough that the
- * old spellings are no longer in circulation, this table can go.
+ * That correction is local to this package, so anything generated from a
+ * released schema — which is every other protobuf implementation — still emits
+ * the old spellings. Without this table those fields would be silently dropped
+ * on input, so it is a permanent part of the bridge rather than a migration aid.
+ *
+ * Only the JSON *names* differ: every field number is unchanged, so the binary
+ * wire format is identical in both directions and needs no compatibility
+ * handling.
  */
 const LEGACY_FIELD_INPUT_ALIASES: Record<string, readonly string[]> = {
   "GraphicsCollection.collection": ["graphic"],
