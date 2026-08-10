@@ -112,6 +112,32 @@ const MESSAGE_FIELD_ALIASES: Record<string, string> = {
   "CustomExtension.value": "customExtensionValue",
   "DistributionConstraints.tlp": "tlpClassification",
   "Hash.value": "content",
+  "LicenseExpressionDetailed.details": "expressionDetails",
+};
+
+/**
+ * Extra JSON keys accepted on input, keyed by `<Message>.<localName>`. Unlike
+ * {@link MESSAGE_FIELD_ALIASES} these never change what is written back out —
+ * they only widen what the decoder recognises.
+ *
+ * The three entries below are the field names used by the *released* CycloneDX
+ * protobuf schemas, which disagree with their own JSON schema and XSD. Upstream
+ * has since corrected them (`postalCodeue` -> `postalCode`,
+ * `graphic` -> `collection`, `cryptoRef` -> `cryptoRefArray`) and the vendored
+ * protos here carry the corrected names, so canonical output is now correct
+ * without an alias. But protobuf-JSON produced by any tool generated from a
+ * released spec still uses the old spellings, and dropping them would silently
+ * discard those fields.
+ *
+ * Only the JSON *names* ever differed: every field number is unchanged, so the
+ * binary wire format is identical in both directions and needs no compatibility
+ * handling. Once the corrected schemas have been released long enough that the
+ * old spellings are no longer in circulation, this table can go.
+ */
+const LEGACY_FIELD_INPUT_ALIASES: Record<string, readonly string[]> = {
+  "GraphicsCollection.collection": ["graphic"],
+  "PostalAddressType.postalCode": ["postalCodeue"],
+  "ProtocolProperties.cryptoRefArray": ["cryptoRef"],
 };
 
 const ENUM_CANONICAL_STYLE_OVERRIDES: Record<string, string> = {
@@ -180,30 +206,12 @@ const SPECIAL_ENUM_CANONICAL_VALUES: Record<string, Record<string, string>> = {
   },
 };
 
-const enumMapCache = new Map<string, EnumMapPair>();
+const enumMapCache = new WeakMap<EnumDescriptorLike, EnumMapPair>();
 
 const BOM_OBJECT_WRAPPED_LIST_FIELDS = new Set(["declarations", "definitions"]);
 
 function isJsonRecord(value: JsonLike): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function sanitizeBomJsonValue(value: JsonLike): JsonLike {
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry) => entry !== undefined)
-      .map((entry) => sanitizeBomJsonValue(entry));
-  }
-
-  if (isJsonRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, entry]) => entry !== undefined)
-        .map(([key, entry]) => [key, sanitizeBomJsonValue(entry)]),
-    );
-  }
-
-  return value;
 }
 
 function shouldWrapBomObjectListField(
@@ -311,13 +319,26 @@ function mergeBomObjectListEntries(entries: JsonLike[]): JsonLike {
   return Object.keys(mergedEntry).length ? mergedEntry : undefined;
 }
 
+const specVersionCache = new Map<string | number, SupportedSpecVersion>();
+
 function normalizeSpecVersion(
   specVersion: string | number,
 ): SupportedSpecVersion {
+  const cached = specVersionCache.get(specVersion);
+  if (cached !== undefined) {
+    return cached;
+  }
+  // Fast-path the exact canonical strings before the regex.
+  if (specVersion === "1.5" || specVersion === "1.6" || specVersion === "1.7") {
+    specVersionCache.set(specVersion, specVersion);
+    return specVersion;
+  }
   const normalized = String(specVersion).trim().toLowerCase().replace(/^v/, "");
   const match = /^(1\.[567])(?:\.0+)?$/.exec(normalized);
   if (match) {
-    return match[1] as SupportedSpecVersion;
+    const result = match[1] as SupportedSpecVersion;
+    specVersionCache.set(specVersion, result);
+    return result;
   }
 
   throw new Error(
@@ -405,7 +426,7 @@ function enumSuffixToCanonical(
 }
 
 function getEnumMaps(enumDescriptor: EnumDescriptorLike): EnumMapPair {
-  const cachedMaps = enumMapCache.get(enumDescriptor.typeName);
+  const cachedMaps = enumMapCache.get(enumDescriptor);
   if (cachedMaps) {
     return cachedMaps;
   }
@@ -429,7 +450,7 @@ function getEnumMaps(enumDescriptor: EnumDescriptorLike): EnumMapPair {
     canonicalToProto,
     protoToCanonical,
   };
-  enumMapCache.set(enumDescriptor.typeName, enumMaps);
+  enumMapCache.set(enumDescriptor, enumMaps);
   return enumMaps;
 }
 
@@ -464,31 +485,251 @@ function getFieldAlias(
   );
 }
 
-function getFieldInputKeys(
+function getLegacyFieldInputAliases(
   messageDescriptor: MessageDescriptorLike,
   fieldDescriptor: FieldDescriptorLike,
-): string[] {
-  return Array.from(
-    new Set(
-      [
-        getFieldAlias(messageDescriptor, fieldDescriptor),
-        fieldDescriptor.jsonName,
-        fieldDescriptor.localName,
-        fieldDescriptor.name,
-        `${fieldDescriptor.name}`.replaceAll("_", "-"),
-      ].filter((entry): entry is string => Boolean(entry)),
-    ),
+): readonly string[] {
+  return (
+    LEGACY_FIELD_INPUT_ALIASES[
+      `${messageDescriptor.name}.${fieldDescriptor.localName}`
+    ] ?? []
   );
 }
 
-function getFieldOutputKey(
+/**
+ * Per-field metadata derived once from the (immutable, module-level) descriptor
+ * and reused across every message instance. `inputKeys` is the full set of JSON
+ * keys that resolve to this field (alias, jsonName, localName, proto name,
+ * dashed name); `byInputKey` indexes them for O(1) lookup so the transform can
+ * iterate the *data* keys rather than the *schema* fields.
+ */
+type FieldMeta = {
+  descriptor: FieldDescriptorLike;
+  jsonName: string;
+  outputKey: string;
+  inputKeys: string[];
+  isBomObjectWrappedList: boolean;
+};
+
+type MessageMeta = {
+  byInputKey: Map<string, FieldMeta>;
+  hasExpressionDetailedField: boolean;
+  needsTransform: boolean;
+};
+
+const messageMetaCache = new WeakMap<MessageDescriptorLike, MessageMeta>();
+
+/**
+ * Determines whether a message (transitively) contains any field that the
+ * bridge layer must rewrite: an aliased field, an enum, a Bom-object-wrapped
+ * list, a scalar-list wrapper, a `repeated Dependency` list, or the 1.7
+ * LicenseChoice `expression_detailed` oneof. Messages that need no transform
+ * can be passed through without rebuilding, which skips large swathes of a BOM
+ * (e.g. every `properties[]` entry). Cycle-safe via the `computing` set.
+ */
+function computeNeedsTransform(
   messageDescriptor: MessageDescriptorLike,
-  fieldDescriptor: FieldDescriptorLike,
-): string {
-  return (
-    getFieldAlias(messageDescriptor, fieldDescriptor) ??
-    fieldDescriptor.jsonName
-  );
+  computing: Set<MessageDescriptorLike>,
+): boolean {
+  const cached = messageMetaCache.get(messageDescriptor);
+  if (cached) {
+    return cached.needsTransform;
+  }
+  if (computing.has(messageDescriptor)) {
+    return false;
+  }
+  computing.add(messageDescriptor);
+
+  for (const field of messageDescriptor.fields) {
+    if (getFieldAlias(messageDescriptor, field) !== undefined) {
+      return true;
+    }
+    // A legacy input alias is the only thing that needs rewriting on some
+    // messages (PostalAddressType and GraphicsCollection are otherwise plain
+    // scalars). Without this the subtree would be skipped and the legacy key
+    // would fall through as an unknown property and be dropped.
+    if (getLegacyFieldInputAliases(messageDescriptor, field).length > 0) {
+      return true;
+    }
+    if (
+      field.fieldKind === "enum" ||
+      field.listKind === "enum" ||
+      field.mapKind === "enum"
+    ) {
+      return true;
+    }
+    if (shouldWrapBomObjectListField(messageDescriptor, field)) {
+      return true;
+    }
+    if (field.localName === "expressionDetailed") {
+      return true;
+    }
+    if (field.message) {
+      if (
+        field.listKind === "message" &&
+        field.message.name === "Dependency"
+      ) {
+        return true;
+      }
+      if (getScalarListWrapperInnerField(field.message)) {
+        return true;
+      }
+      if (computeNeedsTransform(field.message, computing)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function getMessageMeta(
+  messageDescriptor: MessageDescriptorLike,
+): MessageMeta {
+  const cached = messageMetaCache.get(messageDescriptor);
+  if (cached) {
+    return cached;
+  }
+
+  const byInputKey = new Map<string, FieldMeta>();
+  let hasExpressionDetailedField = false;
+
+  for (const descriptor of messageDescriptor.fields) {
+    if (descriptor.localName === "expressionDetailed") {
+      hasExpressionDetailedField = true;
+    }
+    const alias = getFieldAlias(messageDescriptor, descriptor);
+    const outputKey = alias ?? descriptor.jsonName;
+    const inputKeys = Array.from(
+      new Set(
+        [
+          alias,
+          descriptor.jsonName,
+          descriptor.localName,
+          descriptor.name,
+          `${descriptor.name}`.replaceAll("_", "-"),
+          ...getLegacyFieldInputAliases(messageDescriptor, descriptor),
+        ].filter((entry): entry is string => Boolean(entry)),
+      ),
+    );
+    const meta: FieldMeta = {
+      descriptor,
+      jsonName: descriptor.jsonName,
+      outputKey,
+      inputKeys,
+      isBomObjectWrappedList: shouldWrapBomObjectListField(
+        messageDescriptor,
+        descriptor,
+      ),
+    };
+    for (const key of inputKeys) {
+      byInputKey.set(key, meta);
+    }
+  }
+
+  const needsTransform = computeNeedsTransform(messageDescriptor, new Set());
+  const result = { byInputKey, hasExpressionDetailedField, needsTransform };
+  messageMetaCache.set(messageDescriptor, result);
+  return result;
+}
+
+/**
+ * Bridges the CycloneDX `Dependency` representation between canonical JSON and
+ * protobuf. Canonical JSON flattens the graph into entries of shape
+ * `{ ref, dependsOn: [ref, ...], provides: [ref, ...] }`, while the protobuf
+ * mirrors the XML model by nesting children as `repeated Dependency
+ * dependencies`. Without this bridge, `dependsOn` is an unknown proto key that
+ * is either rejected (default options) or silently dropped
+ * (`ignoreUnknownFields: true`), emptying the dependency graph.
+ */
+function convertDependencyEntryToProto(entry: JsonLike): JsonLike {
+  if (!isJsonRecord(entry)) {
+    return entry;
+  }
+  const { dependsOn, dependencies, ...rest } = entry;
+  const result: JsonRecord = { ...rest };
+  const source = dependsOn !== undefined ? dependsOn : dependencies;
+  if (source !== undefined) {
+    if (Array.isArray(source)) {
+      result.dependencies = source.map((item) =>
+        typeof item === "string"
+          ? { ref: item }
+          : convertDependencyEntryToProto(item),
+      );
+    } else {
+      result.dependencies = source;
+    }
+  }
+  return result;
+}
+
+/**
+ * Flattens a protobuf dependency tree into the canonical flat form, hoisting
+ * any nested entry that carries its own edges (`dependencies`/`provides`) to a
+ * sibling entry within the same array rather than dropping the transitive data.
+ * Entries are de-duplicated by `ref`, merging `dependsOn` lists on collision so
+ * nothing is lost when a node appears both nested and at the top level.
+ */
+function flattenProtoDependenciesToCanonical(deps: JsonLike[]): JsonLike {
+  const result: JsonRecord[] = [];
+  const byRef = new Map<string, JsonRecord>();
+  const queue: JsonLike[] = [...deps];
+  while (queue.length > 0) {
+    const entry = queue.shift();
+    if (!isJsonRecord(entry)) {
+      continue;
+    }
+    const ref = typeof entry.ref === "string" ? entry.ref : undefined;
+    const nested = Array.isArray(entry.dependencies) ? entry.dependencies : [];
+    const dependsOn: string[] = [];
+    for (const child of nested) {
+      if (isJsonRecord(child) && typeof child.ref === "string") {
+        dependsOn.push(child.ref);
+        if (Array.isArray(child.dependencies) || Array.isArray(child.provides)) {
+          queue.push(child);
+        }
+      }
+    }
+    const canonical: JsonRecord = { ...entry };
+    delete canonical.dependencies;
+    if (dependsOn.length > 0) {
+      canonical.dependsOn = dependsOn;
+    }
+    if (ref !== undefined && byRef.has(ref)) {
+      const existing = byRef.get(ref);
+      if (existing !== undefined) {
+        const merged = Array.isArray(existing.dependsOn)
+          ? [...(existing.dependsOn as string[])]
+          : [];
+        for (const dep of dependsOn) {
+          if (!merged.includes(dep)) {
+            merged.push(dep);
+          }
+        }
+        if (merged.length > 0) {
+          existing.dependsOn = merged;
+        }
+      }
+    } else {
+      result.push(canonical);
+      if (ref !== undefined) {
+        byRef.set(ref, canonical);
+      }
+    }
+  }
+  return result;
+}
+
+function transformDependencyList(
+  value: JsonLike,
+  direction: NormalizationDirection,
+): JsonLike {
+  if (!Array.isArray(value)) {
+    return value;
+  }
+  if (direction === "toProto") {
+    return value.map((entry) => convertDependencyEntryToProto(entry));
+  }
+  return flattenProtoDependenciesToCanonical(value);
 }
 
 function transformFieldValue(
@@ -506,19 +747,30 @@ function transformFieldValue(
       if (!Array.isArray(value)) {
         return value;
       }
+      // Fused sanitization: drop undefined entries in place of a separate
+      // deep-clone pass.
+      const defined = value.some((entry) => entry === undefined)
+        ? value.filter((entry) => entry !== undefined)
+        : value;
       if (fieldDescriptor.listKind === "enum" && fieldDescriptor.enum) {
         const enumDescriptor = fieldDescriptor.enum;
-        return value.map((entry) =>
+        return defined.map((entry) =>
           transformEnumValue(enumDescriptor, entry, direction),
         );
       }
       if (fieldDescriptor.listKind === "message" && fieldDescriptor.message) {
+        if (fieldDescriptor.message.name === "Dependency") {
+          return transformDependencyList(defined, direction);
+        }
         const messageDescriptor = fieldDescriptor.message;
-        return value.map((entry) =>
+        if (!getMessageMeta(messageDescriptor).needsTransform) {
+          return passThroughUntransformed(defined, direction);
+        }
+        return defined.map((entry) =>
           transformMessageValue(messageDescriptor, entry, direction),
         );
       }
-      return value;
+      return defined;
     case "map":
       if (!isJsonRecord(value)) {
         return value;
@@ -556,10 +808,124 @@ function transformFieldValue(
           direction,
         );
       }
+      if (!getMessageMeta(fieldDescriptor.message).needsTransform) {
+        return passThroughUntransformed(value, direction);
+      }
       return transformMessageValue(fieldDescriptor.message, value, direction);
     default:
       return value;
   }
+}
+
+/**
+ * Packs canonical LicenseChoice `{ expression, expressionDetails }` into the
+ * protobuf `expression_detailed` oneof case. The CycloneDX JSON schema carries
+ * `expression` and `expressionDetails` as sibling keys, while the 1.7 proto
+ * combines them inside the nested `LicenseExpressionDetailed` message. Only
+ * applied for descriptors that actually declare the `expression_detailed`
+ * field (1.7), so 1.5/1.6 are unaffected.
+ */
+function packLicenseChoiceExpressionDetailed(value: JsonRecord): JsonRecord {
+  const { expression, expressionDetails, ...rest } = value;
+  const expressionDetailed: JsonRecord = {};
+  if (expression !== undefined) {
+    expressionDetailed.expression = expression;
+  }
+  if (expressionDetails !== undefined) {
+    expressionDetailed.details = expressionDetails;
+  }
+  return { ...rest, expressionDetailed };
+}
+
+/**
+ * Inverse of {@link packLicenseChoiceExpressionDetailed}: hoists the protobuf
+ * `expressionDetailed` message back into sibling canonical `expression` and
+ * `expressionDetails` keys.
+ */
+function unpackLicenseChoiceExpressionDetailed(result: JsonRecord): JsonRecord {
+  const { expressionDetailed, ...rest } = result;
+  if (!isJsonRecord(expressionDetailed)) {
+    return result;
+  }
+  const hoisted: JsonRecord = { ...rest };
+  if (expressionDetailed.expression !== undefined) {
+    hoisted.expression = expressionDetailed.expression;
+  }
+  const details =
+    expressionDetailed.expressionDetails ?? expressionDetailed.details;
+  if (details !== undefined) {
+    hoisted.expressionDetails = details;
+  }
+  return hoisted;
+}
+
+/**
+ * Allocation-free probe for `undefined` anywhere in a subtree. Short-circuits on
+ * the first hit, so the common (undefined-free) case is a plain read walk.
+ */
+function containsUndefined(value: JsonLike): boolean {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (entry === undefined || containsUndefined(entry)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (isJsonRecord(value)) {
+    for (const key of Object.keys(value)) {
+      const entry = value[key];
+      if (entry === undefined || containsUndefined(entry)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+
+/** Deep copy of `value` with undefined properties and array entries removed. */
+function stripUndefined(value: JsonLike): JsonLike {
+  if (Array.isArray(value)) {
+    const stripped: JsonLike[] = [];
+    for (const entry of value) {
+      if (entry !== undefined) {
+        stripped.push(stripUndefined(entry));
+      }
+    }
+    return stripped;
+  }
+  if (isJsonRecord(value)) {
+    const stripped: JsonRecord = {};
+    for (const key of Object.keys(value)) {
+      const entry = value[key];
+      if (entry !== undefined) {
+        stripped[key] = stripUndefined(entry);
+      }
+    }
+    return stripped;
+  }
+  return value;
+}
+
+/**
+ * Pass-through for subtrees whose descriptors need no field rewriting. The
+ * rewriting can be skipped, but `undefined` still has to go: protobuf-es rejects
+ * `undefined` on a known field, and the helper API promises callers may hand it
+ * ordinary JavaScript objects without pre-stripping. Probing first keeps the
+ * skip allocation-free whenever there is nothing to strip, which is the norm.
+ *
+ * Only `toProto` can carry `undefined` — the `fromProto` input comes from
+ * `toJson`, which never emits it — so that direction returns immediately.
+ */
+function passThroughUntransformed(
+  value: JsonLike,
+  direction: NormalizationDirection,
+): JsonLike {
+  if (direction === "fromProto") {
+    return value;
+  }
+  return containsUndefined(value) ? stripUndefined(value) : value;
 }
 
 function transformMessageValue(
@@ -571,66 +937,68 @@ function transformMessageValue(
     return value;
   }
 
+  const meta = getMessageMeta(messageDescriptor);
+  const isLicenseChoice = messageDescriptor.name === "LicenseChoice";
+
   if (direction === "toProto") {
-    const normalizedValue: JsonRecord = { ...value };
-    for (const fieldDescriptor of messageDescriptor.fields) {
-      const sourceKey = getFieldInputKeys(
-        messageDescriptor,
-        fieldDescriptor,
-      ).find((key) => Object.hasOwn(value, key));
-      if (!sourceKey) {
+    const source =
+      isLicenseChoice &&
+      meta.hasExpressionDetailedField &&
+      Object.hasOwn(value, "expressionDetails")
+        ? packLicenseChoiceExpressionDetailed(value)
+        : value;
+    const normalizedValue: JsonRecord = {};
+    for (const key of Object.keys(source)) {
+      const rawValue = source[key];
+      // Fused sanitization: skip undefined properties in place of a separate
+      // deep-clone pass (see sanitizeBomJsonValue).
+      if (rawValue === undefined) {
         continue;
       }
-      const sourceValue = shouldWrapBomObjectListField(
-        messageDescriptor,
-        fieldDescriptor,
-      )
-        ? Array.isArray(value[sourceKey]) || !isJsonRecord(value[sourceKey])
-          ? value[sourceKey]
-          : [value[sourceKey]]
-        : value[sourceKey];
-      const transformedValue = transformFieldValue(
-        fieldDescriptor,
+      const fieldMeta = meta.byInputKey.get(key);
+      if (!fieldMeta) {
+        normalizedValue[key] = rawValue;
+        continue;
+      }
+      let sourceValue = rawValue;
+      if (
+        fieldMeta.isBomObjectWrappedList &&
+        !Array.isArray(sourceValue) &&
+        isJsonRecord(sourceValue)
+      ) {
+        sourceValue = [sourceValue];
+      }
+      normalizedValue[fieldMeta.jsonName] = transformFieldValue(
+        fieldMeta.descriptor,
         sourceValue,
         direction,
       );
-      for (const inputKey of getFieldInputKeys(
-        messageDescriptor,
-        fieldDescriptor,
-      )) {
-        if (inputKey !== fieldDescriptor.jsonName) {
-          delete normalizedValue[inputKey];
-        }
-      }
-      normalizedValue[fieldDescriptor.jsonName] = transformedValue;
     }
     return normalizedValue;
   }
 
   const normalizedValue: JsonRecord = {};
-  for (const fieldDescriptor of messageDescriptor.fields) {
-    const sourceKey = [
-      fieldDescriptor.jsonName,
-      fieldDescriptor.localName,
-      fieldDescriptor.name,
-    ].find((key) => Object.hasOwn(value, key));
-    if (!sourceKey) {
+  for (const key of Object.keys(value)) {
+    const fieldMeta = meta.byInputKey.get(key);
+    if (!fieldMeta) {
       continue;
     }
-
     let transformedValue = transformFieldValue(
-      fieldDescriptor,
-      value[sourceKey],
+      fieldMeta.descriptor,
+      value[key],
       direction,
     );
-    if (shouldWrapBomObjectListField(messageDescriptor, fieldDescriptor)) {
-      transformedValue = Array.isArray(transformedValue)
-        ? mergeBomObjectListEntries(transformedValue)
-        : transformedValue;
+    if (fieldMeta.isBomObjectWrappedList && Array.isArray(transformedValue)) {
+      transformedValue = mergeBomObjectListEntries(transformedValue);
     }
-
-    normalizedValue[getFieldOutputKey(messageDescriptor, fieldDescriptor)] =
-      transformedValue;
+    normalizedValue[fieldMeta.outputKey] = transformedValue;
+  }
+  if (
+    isLicenseChoice &&
+    meta.hasExpressionDetailedField &&
+    Object.hasOwn(normalizedValue, "expressionDetailed")
+  ) {
+    return unpackLicenseChoiceExpressionDetailed(normalizedValue);
   }
   return normalizedValue;
 }
@@ -639,16 +1007,14 @@ function normalizeBomJsonForProto(
   schema: AnyBomSchema,
   bomJson: JsonLike,
 ): JsonLike {
-  const normalizedBomJson = sanitizeBomJsonValue(bomJson);
-  if (!isJsonRecord(normalizedBomJson)) {
-    return normalizedBomJson;
+  if (!isJsonRecord(bomJson)) {
+    return bomJson;
   }
 
-  const protoCompatibleJson = transformMessageValue(
-    schema,
-    normalizedBomJson,
-    "toProto",
-  );
+  // The transform walk fuses undefined-stripping (see transformMessageValue's
+  // toProto loop and transformFieldValue's list branch), so a separate
+  // sanitizeBomJsonValue deep-clone pass is no longer needed here.
+  const protoCompatibleJson = transformMessageValue(schema, bomJson, "toProto");
   if (isJsonRecord(protoCompatibleJson)) {
     delete protoCompatibleJson.bomFormat;
     delete protoCompatibleJson.bom_format;
@@ -665,22 +1031,22 @@ function normalizeBomJsonFromProto(
     return bomJson;
   }
 
-  return sanitizeBomJsonValue({
-    bomFormat: "CycloneDX",
-    ...((transformMessageValue(
-      schema,
-      {
-        ...bomJson,
-        specVersion:
-          typeof bomJson.specVersion === "string"
-            ? bomJson.specVersion
-            : typeof bomJson.spec_version === "string"
-              ? bomJson.spec_version
-              : bom?.specVersion,
-      },
-      "fromProto",
-    ) as JsonRecord) || {}),
-  });
+  // The transform output is built fresh (only known fields), so it carries no
+  // undefined values; a sanitize pass is unnecessary here.
+  const normalized = transformMessageValue(
+    schema,
+    {
+      ...bomJson,
+      specVersion:
+        typeof bomJson.specVersion === "string"
+          ? bomJson.specVersion
+          : typeof bomJson.spec_version === "string"
+            ? bomJson.spec_version
+            : bom?.specVersion,
+    },
+    "fromProto",
+  ) as JsonRecord;
+  return { bomFormat: "CycloneDX", ...normalized };
 }
 
 export function getBomSchema(specVersion: "1.5"): typeof BomSchema15;
@@ -836,14 +1202,16 @@ export function parseBomJson(
   json: JsonValue,
   options?: Partial<JsonReadOptions>,
 ): AnyBom {
-  const sanitizedBomJson = sanitizeBomJsonValue(json);
-  if (!isJsonRecord(sanitizedBomJson)) {
+  if (!isJsonRecord(json)) {
     throw new Error("CycloneDX BOM JSON must be an object.");
   }
 
+  // The transform in decodeBomJson fuses undefined-stripping, so the raw input
+  // can be passed directly. detectBomSpecVersion only reads specVersion /
+  // spec_version, which are never undefined in a valid version carrier.
   return decodeBomJson(
-    detectBomSpecVersion(sanitizedBomJson as BomVersionCarrier),
-    sanitizedBomJson as JsonValue,
+    detectBomSpecVersion(json as BomVersionCarrier),
+    json as JsonValue,
     options,
   );
 }
@@ -883,17 +1251,66 @@ export function encodeBomJson(
   bom: AnyBom,
   options?: Partial<JsonWriteOptions>,
 ): JsonValue {
+  const schema = getBomSchemaForBom(bom);
   return normalizeBomJsonFromProto(
-    getBomSchemaForBom(bom),
-    toJson(getBomSchemaForBom(bom), bom, options),
+    schema,
+    toJson(schema, bom, options),
     bom,
   ) as JsonValue;
+}
+
+/**
+ * Reads the `spec_version` string (field 1, wire type LEN → tag 0x0A) from the
+ * start of a protobuf Bom encoding without decoding the whole message. Returns
+ * the version string when the first top-level field is a well-formed
+ * length-delimited value, or `undefined` to fall back to brute-force decoding.
+ */
+function peekSpecVersionFromBinary(bytes: Uint8Array): string | undefined {
+  if (bytes.length < 2 || bytes[0] !== 0x0a) {
+    return undefined;
+  }
+  let length = 0;
+  let shift = 0;
+  let pos = 1;
+  while (pos < bytes.length) {
+    const byte = bytes[pos];
+    pos += 1;
+    if (byte === undefined) {
+      return undefined;
+    }
+    length |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) {
+      break;
+    }
+    shift += 7;
+    if (shift > 35) {
+      return undefined;
+    }
+  }
+  if (length <= 0 || pos + length > bytes.length) {
+    return undefined;
+  }
+  let version = "";
+  for (let i = pos; i < pos + length; i += 1) {
+    version += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return version;
 }
 
 export function parseBomBinary(
   bytes: Uint8Array,
   options?: Partial<BinaryReadOptions>,
 ): AnyBom {
+  const peeked = peekSpecVersionFromBinary(bytes);
+  if (peeked !== undefined) {
+    try {
+      return decodeBomBinary(normalizeSpecVersion(peeked), bytes, options);
+    } catch {
+      // The peek may have read a non-version string (e.g. field 1 was not
+      // spec_version in an odd input). Fall through to brute-force below.
+    }
+  }
+
   let lastError: unknown;
   for (const specVersion of SUPPORTED_BINARY_READ_ORDER) {
     try {
@@ -917,4 +1334,129 @@ export function encodeBomJsonString(
     undefined,
     options?.prettySpaces ?? 0,
   );
+}
+
+export type BomConversionResult = {
+  bom: AnyBom;
+  warnings: string[];
+};
+
+/**
+ * Converts a BOM to a different CycloneDX spec version (1.5 <-> 1.6 <->
+ * 1.7, up or down). Works by round-tripping through canonical JSON: the source
+ * is encoded, the `specVersion` is rewritten, and the target schema decodes it
+ * with `ignoreUnknownFields` so fields the target does not know are silently
+ * dropped rather than throwing. A recursive key diff produces human-readable
+ * `warnings` listing the field paths that were lost, so downgrades are
+ * lossy-but-visible rather than silent. Upgrades typically produce no warnings
+ * because every lower-version field exists in the higher schema.
+ */
+export function convertBom(
+  bom: AnyBom,
+  targetSpecVersion: string | number,
+): BomConversionResult {
+  const target = normalizeSpecVersion(targetSpecVersion);
+  const sourceJson = encodeBomJson(bom) as JsonRecord;
+  const candidate: JsonRecord = { ...sourceJson, specVersion: target };
+  delete candidate.spec_version;
+
+  const converted = decodeBomJson(target, candidate as JsonValue, {
+    ignoreUnknownFields: true,
+  });
+
+  const resultJson = encodeBomJson(converted) as JsonRecord;
+  const dropped = new Set<string>();
+  collectDroppedPaths(sourceJson, resultJson, "$", dropped);
+
+  return { bom: converted, warnings: Array.from(dropped).sort() };
+}
+
+/**
+ * Records every path present in `source` but absent from `target`, which for a
+ * downgrade is exactly the set of fields the target spec version cannot express.
+ *
+ * Arrays are walked element-wise but reported with a collapsed `[]` segment, and
+ * paths are accumulated in a Set. A 10,000-component BOM that loses
+ * `component.tags` therefore yields the single warning `$.components[].tags`
+ * rather than 10,000 indexed duplicates. Element order is preserved by the
+ * encode/decode round-trip, so comparing by index is sound; the length guard is
+ * defensive only.
+ */
+function collectDroppedPaths(
+  source: JsonLike,
+  target: JsonLike,
+  path: string,
+  dropped: Set<string>,
+): void {
+  if (Array.isArray(source)) {
+    if (!Array.isArray(target)) {
+      return;
+    }
+    const shared = Math.min(source.length, target.length);
+    for (let index = 0; index < shared; index += 1) {
+      collectDroppedPaths(source[index], target[index], `${path}[]`, dropped);
+    }
+    return;
+  }
+  if (!isJsonRecord(source) || !isJsonRecord(target)) {
+    return;
+  }
+  for (const key of Object.keys(source)) {
+    if (key === "specVersion") {
+      continue;
+    }
+    const childPath = `${path}.${key}`;
+    if (!Object.hasOwn(target, key)) {
+      dropped.add(childPath);
+      continue;
+    }
+    collectDroppedPaths(source[key], target[key], childPath, dropped);
+  }
+}
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      i += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+export type BomStats = {
+  specVersion: SupportedSpecVersion;
+  componentCount: number;
+  dependencyCount: number;
+  jsonByteSize: number;
+  binaryByteSize: number;
+  compressionRatio: number;
+};
+
+/**
+ * Computes cheap summary statistics for a BOM: component and dependency counts,
+ * canonical JSON and protobuf binary byte sizes, and the JSON-to-binary
+ * compression ratio. Shared by the CLI's `inspect` command.
+ */
+export function bomStats(bom: AnyBom): BomStats {
+  const jsonString = encodeBomJsonString(bom);
+  const jsonBytes = utf8ByteLength(jsonString);
+  const binaryBytes = encodeBomBinary(bom).byteLength;
+  return {
+    specVersion: detectBomSpecVersion(bom),
+    componentCount: bom.components.length,
+    dependencyCount: bom.dependencies.length,
+    jsonByteSize: jsonBytes,
+    binaryByteSize: binaryBytes,
+    compressionRatio:
+      jsonBytes > 0 ? binaryBytes / jsonBytes : 0,
+  };
 }

@@ -1,5 +1,5 @@
 syntax = "proto3";
-package cyclonedx.v1_5;
+package cyclonedx.v1_5; // 1.5.1
 import "google/protobuf/timestamp.proto";
 
 // Specifies attributes of the text
@@ -106,6 +106,7 @@ message Component {
   // Specifies the scope of the component. If scope is not specified, SCOPE_REQUIRED scope should be assumed by the consumer of the BOM
   optional Scope scope = 11;
   repeated Hash hashes = 12;
+  // EITHER (list of SPDX licenses and/or named licenses) OR (tuple of one SPDX License Expression)
   repeated LicenseChoice licenses = 13;
   // An optional copyright notice informing users of the underlying claims to copyright ownership in a published work.
   optional string copyright = 14;
@@ -132,7 +133,7 @@ message Component {
   // A model card describes the intended uses of a machine learning model, potential limitations, biases, ethical considerations, training parameters, datasets used to train the model, performance metrics, and other relevant data useful for ML transparency.
   optional ModelCard modelCard = 25;
   // This object SHOULD be specified for any component of type `data` and MUST NOT be specified for other component types.
-  optional ComponentData data = 26;
+  repeated ComponentData data = 26;
 }
 
 // Specifies the data flow.
@@ -431,6 +432,7 @@ message Metadata {
   // The organization that supplied the component that the BOM describes. The supplier may often be the manufacture, but may also be a distributor or repackager.
   optional OrganizationalEntity supplier = 6;
   // The license information for the BOM document
+  // EITHER (list of SPDX licenses and/or named licenses) OR (tuple of one SPDX License Expression)
   optional LicenseChoice licenses = 7;
   // Specifies optional, custom, properties
   repeated Property properties = 8;
@@ -554,6 +556,7 @@ message Service {
   // A boolean value indicating if use of the service crosses a trust zone or boundary. A value of true indicates that by using the service, a trust boundary is crossed. A value of false indicates that by using the service, a trust boundary is not crossed.
   optional bool x_trust_boundary = 9;
   repeated DataFlow data = 10;
+  // EITHER (list of SPDX licenses and/or named licenses) OR (tuple of one SPDX License Expression)
   repeated LicenseChoice licenses = 11;
   // Provides the ability to document external references related to the service.
   repeated ExternalReference external_references = 12;
@@ -650,6 +653,7 @@ message EvidenceCopyright {
 }
 
 message Evidence {
+  // EITHER (list of SPDX licenses and/or named licenses) OR (tuple of one SPDX License Expression)
   repeated LicenseChoice licenses = 1;
   repeated EvidenceCopyright copyright = 2;
   optional EvidenceIdentity identity = 3;
@@ -956,7 +960,7 @@ message VulnerabilityAffectedVersions {
   oneof choice {
     // A single version of a component or service.
     string version = 1;
-    // A version range specified in Package URL Version Range syntax (vers) which is defined at https://github.com/package-url/purl-spec/VERSION-RANGE-SPEC.rst
+    // A version range specified in Package URL Version Range syntax (vers) which is defined at https://github.com/package-url/vers-spec
     string range = 2;
   }
   // The vulnerability status for the version or range of versions. Defaults to VULNERABILITY_AFFECTED_STATUS_AFFECTED if not specified.
@@ -1005,6 +1009,8 @@ message ModelCard {
   optional QuantitativeAnalysis quantitativeAnalysis = 3;
   // What considerations should be taken into account regarding the model's construction, training, and application?
   optional ModelCardConsiderations considerations = 4;
+  // Specifies optional, custom, properties
+  repeated Property properties = 5;
 
   message ModelParameters {
     // The overall approach to learning used by the model for problem solving.
@@ -1164,7 +1170,7 @@ message GraphicsCollection {
   // A description of this collection of graphics.
   optional string description = 1;
   // A collection of graphics.
-  repeated Graphic graphic = 2;
+  repeated Graphic collection = 2;
 
   message Graphic {
     // The name of the graphic.

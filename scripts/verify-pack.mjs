@@ -53,6 +53,16 @@ for (const filePath of filePaths) {
       `Packed artifact must not include documentation files: '${filePath}'.`,
     );
   }
+  if (filePath === "bench" || filePath.startsWith("bench/")) {
+    throw new Error(
+      `Packed artifact must not include benchmark files: '${filePath}'.`,
+    );
+  }
+  if (filePath === "tests" || filePath.startsWith("tests/")) {
+    throw new Error(
+      `Packed artifact must not include test files: '${filePath}'.`,
+    );
+  }
 }
 
 if (packResult.size <= 0 || packResult.unpackedSize <= 0) {

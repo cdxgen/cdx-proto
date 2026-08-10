@@ -61,6 +61,9 @@ const schema = getBomSchema(parsed.specVersion);
 - `parseBomJson(json)` and `parseBomJsonString(json)` auto-detect the schema from `specVersion` / `spec_version`.
 - `decodeBomBinary(specVersion, bytes)` decodes a protobuf BOM when the schema version is known.
 - `encodeBomBinary(bom)`, `encodeBomJson(bom)`, and `encodeBomJsonString(bom)` choose the correct schema from the BOM itself.
+- `convertBom(bom, targetSpecVersion)` cross-converts between spec versions. Returns `{ bom, warnings }` where `warnings` lists field paths dropped during a lossy downgrade. Upgrades typically produce no warnings.
+- `bomStats(bom)` returns component/dependency counts and JSON/binary byte sizes with the compression ratio.
+- `detectBomSpecVersion(value)` reads the spec version from a BOM object or message.
 
 ### Canonical JSON guarantees
 
@@ -77,7 +80,51 @@ The helper layer is designed to work with canonical CycloneDX JSON rather than p
   - the BOM `specVersion`
   - canonical enum values instead of protobuf enum names such as `CLASSIFICATION_*`, `HASH_ALG_*`, or `EXTERNAL_REFERENCE_TYPE_*`
   - canonical object shapes for `definitions` and `declarations`
+  - flat `dependencies[].dependsOn: string[]` instead of the protobuf nested `dependencies` tree (see below)
 - `parseBomBinary()` auto-detects the embedded supported schema version (`1.5`, `1.6`, or `1.7`) and can be paired with `encodeBomJson()` to read protobuf BOMs back as canonical CycloneDX JSON.
+
+#### Corrected proto field names, and interop with tools that use the released ones
+
+Three fields are named differently in the released CycloneDX protobuf schemas
+than in the CycloneDX JSON schema they are supposed to mirror. Upstream has
+corrected all three, and the schemas vendored here use the corrected names:
+
+| version(s) | released proto name | corrected proto name | canonical JSON |
+| --- | --- | --- | --- |
+| 1.6, 1.7 | `postalCodeue` | `postalCode` | `postalCode` |
+| 1.5, 1.6, 1.7 | `graphic` | `collection` | `collection` |
+| 1.6, 1.7 | `cryptoRef` | `cryptoRefArray` | `cryptoRefArray` |
+
+Interoperability is preserved in both directions:
+
+- **Binary needs no special handling.** Every field number is unchanged, so the
+  wire format is byte-identical whichever schema produced it.
+- **Both JSON spellings are accepted on input.** Protobuf-JSON emitted by a tool
+  generated from a released schema still uses the old names, so those decode too.
+  Output always uses the canonical JSON name.
+
+If you read these fields directly off a typed message (`cdx_16.*`, `cdx_17.*`)
+rather than through the canonical JSON helpers, use the corrected names.
+
+#### Dependency graph bridging
+
+Canonical CycloneDX JSON expresses the dependency graph as a flat array of
+`{ ref, dependsOn: [ref, ...], provides: [ref, ...] }` entries. The protobuf
+mirrors the XML model and nests children as `repeated Dependency dependencies`,
+so without this library's bridge the `dependsOn` key is unknown to protobuf-es
+and is either rejected (default options) or silently dropped
+(`ignoreUnknownFields: true`), which empties the dependency graph.
+
+The helper layer converts between the two forms automatically:
+
+- **JSON -> protobuf**: each `dependsOn` string becomes a nested
+  `{ ref }` child under `dependencies`. Already-proto-shaped `dependencies`
+  arrays and mixed arrays of strings/objects are also accepted.
+- **protobuf -> JSON**: nested `dependencies` are flattened back into
+  `dependsOn`. If a nested entry carries its own edges (its own `dependencies`
+  or `provides`), it is hoisted to a sibling top-level entry so transitive
+  edges are never lost. Entries are de-duplicated by `ref`.
+
 
 In short: if you provide canonical CycloneDX JSON to the helper API, you should get canonical CycloneDX JSON back after binary or message round-trips.
 
@@ -89,6 +136,26 @@ Use subpath exports to avoid loading schema versions you do not need:
 import { BomSchema as BomSchema15 } from "@cdxgen/cdx-proto/v1.5";
 import { BomSchema as BomSchema16 } from "@cdxgen/cdx-proto/v1.6";
 import { BomSchema as BomSchema17 } from "@cdxgen/cdx-proto/v1.7";
+```
+
+## CLI
+
+The package ships a zero-dependency `cdx-proto` CLI for converting, inspecting,
+and validating BOMs from the shell. The format is auto-detected by file
+extension (`.json` for canonical JSON, anything else for protobuf binary).
+
+```sh
+# Convert JSON to protobuf binary (~2x smaller for typical BOMs)
+npx cdx-proto convert bom.json bom.bin
+
+# Downgrade a 1.7 BOM to 1.5, warning about dropped fields
+npx cdx-proto convert bom.json bom-1.5.json --to 1.5
+
+# Inspect component/dependency counts and byte sizes
+npx cdx-proto inspect bom.bin
+
+# Validate that a file parses cleanly
+npx cdx-proto validate bom.json
 ```
 
 ## License

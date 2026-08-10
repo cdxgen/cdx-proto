@@ -1,10 +1,10 @@
 syntax = "proto3";
-package cyclonedx.v1_7;
+package cyclonedx.v1_7; // 1.7.1
 import "google/protobuf/timestamp.proto";
 
 // Specifies attributes of the text
 message AttachedText {
-  // Specifies the format and nature of the data being attached, helping systems correctly interpret and process the content. Common content type examples include `application/json` for JSON data and `text/plain` for plan text documents. [RFC 2045 section 5.1](https://www.ietf.org/rfc/rfc2045.html#section-5.1) outlines the structure and use of content types. For a comprehensive list of registered content types, refer to the [IANA media types registry](https://www.iana.org/assignments/media-types/media-types.xhtml).
+  // Specifies the format and nature of the data being attached, helping systems correctly interpret and process the content. Common content type examples include `application/json` for JSON data and `text/plain` for plain text documents. [RFC 2045 section 5.1](https://www.ietf.org/rfc/rfc2045.html#section-5.1) outlines the structure and use of content types. For a comprehensive list of registered content types, refer to the [IANA media types registry](https://www.iana.org/assignments/media-types/media-types.xhtml).
   optional string content_type = 1;
   // Specifies the encoding the text is represented in
   optional string encoding = 2;
@@ -990,7 +990,7 @@ message Vulnerability {
   optional Source source = 3;
   // Zero or more pointers to vulnerabilities that are the equivalent of the vulnerability specified. Oftentimes, the same vulnerability may exist in multiple sources of vulnerability intelligence but have different identifiers. References provide a way to correlate vulnerabilities across multiple sources of vulnerability intelligence.
   repeated VulnerabilityReference references = 4;
-  // List of vulnerability ratings
+  // List of vulnerability ratings. Consumers SHOULD consider ratings in prioritization decisions; source ratings may differ and aid prioritization.
   repeated VulnerabilityRating ratings = 5;
   // List of Common Weaknesses Enumerations (CWEs) codes that describe this vulnerability. For example, 399 (of https://cwe.mitre.org/data/definitions/399.html)
   repeated int32 cwes = 6;
@@ -1254,6 +1254,8 @@ message ModelCard {
   optional QuantitativeAnalysis quantitativeAnalysis = 3;
   // What considerations should be taken into account regarding the model's construction, training, and application?
   optional ModelCardConsiderations considerations = 4;
+  // Specifies optional, custom, properties
+  repeated Property properties = 5;
 
   message ModelParameters {
     // The overall approach to learning used by the model for problem-solving.
@@ -1483,7 +1485,7 @@ message PostalAddressType {
   // The post office box number. For example, 901.
   optional string postOfficeBoxNumber = 5;
   // The postal code. For example, 78758.
-  optional string postalCodeue = 6;
+  optional string postalCode = 6;
   // The street address. For example, 100 Main Street.
   optional string streetAddress = 7;
 }
@@ -1570,7 +1572,7 @@ message GraphicsCollection {
   // A description of this collection of graphics.
   optional string description = 1;
   // A collection of graphics.
-  repeated Graphic graphic = 2;
+  repeated Graphic collection = 2;
 
   message Graphic {
     // The name of the graphic.
@@ -2682,7 +2684,7 @@ message CryptoProperties {
     // If this field is present, the deprecated field `.ikev2TransformTypes` MUST be ignored.
     optional Ikev2TransformTypesDetailed ikev2TransformTypesDetailed = 7;
     // The bom-ref(s) to protocol-related cryptographic assets
-    repeated string cryptoRef = 5;
+    repeated string cryptoRefArray = 5;
     // A list of cryptographic assets related to this component.
     optional RelatedCryptographicAssets relatedCryptographicAssets = 6;
   } // end of ProtocolProperties
