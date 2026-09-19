@@ -13,7 +13,21 @@ fast-path work (2a–2d). Use as a reference for detecting regressions: re-run
   `node:perf_hooks`, discards the first run as warm-up, and reports the median
   of the remaining 5.
 
-## Current (Apple Silicon, Node v24.18.0, spec 1.7)
+## Current (Apple Silicon, Node v24.18.0, spec 1.7, @bufbuild/protobuf 2.15.0)
+
+| components | json bytes | binary bytes | parseBomJson (ms) | encodeBomJson (ms) | encodeBomJsonString (ms) | encodeBomBinary (ms) | parseBomBinary (ms) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 40809 | 22911 | 0.39 | 0.27 | 0.31 | 0.22 | 0.26 |
+| 1000 | 416859 | 238761 | 2.75 | 1.73 | 2.68 | 1.42 | 1.73 |
+| 10000 | 4267359 | 2487261 | 24.6 | 17.7 | 27.0 | 14.3 | 16.4 |
+
+Upgrading `@bufbuild/protobuf` 2.13.0 → 2.15.0 (2.14.0 was protobuf-es'
+performance release: growable writer buffers, native base64, compiled
+`create()`) roughly halved every operation on identical hardware and Node:
+parseBomJson 47.3 → 24.6 ms, encodeBomJson 28.6 → 17.7 ms, encodeBomBinary
+66.0 → 14.3 ms, parseBomBinary 45.2 → 16.4 ms at 10 000 components.
+
+## Previous (same machine, @bufbuild/protobuf 2.13.0)
 
 | components | json bytes | binary bytes | parseBomJson (ms) | encodeBomJson (ms) | encodeBomJsonString (ms) | encodeBomBinary (ms) | parseBomBinary (ms) |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

@@ -19,6 +19,10 @@ import { BomSchema as BomSchema15 } from "../dist/v1.5.js";
 import { BomSchema as BomSchema16 } from "../dist/v1.6.js";
 import { BomSchema as BomSchema17 } from "../dist/v1.7.js";
 
+// `new URL(".", import.meta.url).pathname` ends in "/", so path.dirname
+// already strips the trailing "tests/" segment — "../../cyclonedx" therefore
+// resolves to <repo>/../../cyclonedx, the same default checkout location as
+// scripts/check-spec-drift.mjs.
 const upstreamDir =
   process.env.CDX_SPEC_UPSTREAM ??
   path.resolve(
