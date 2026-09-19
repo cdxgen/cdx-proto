@@ -36,6 +36,8 @@ const requiredPaths = [
   "dist/v1.6.js",
   "dist/v1.7.d.ts",
   "dist/v1.7.js",
+  "dist/node.d.ts",
+  "dist/node.js",
   "specification/bom-1.5.proto",
   "specification/bom-1.6.proto",
   "specification/bom-1.7.proto",

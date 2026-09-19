@@ -15,6 +15,7 @@ import {
   toBinary,
   toJson,
 } from "@bufbuild/protobuf";
+import { base64Decode, base64Encode } from "@bufbuild/protobuf/wire";
 
 import type { Bom as Bom15 } from "./lib/bom-1.5_pb.js";
 import { BomSchema as BomSchema15 } from "./lib/bom-1.5_pb.js";
@@ -96,6 +97,17 @@ const bomSchemas: BomSchemaByVersion = {
   "1.6": BomSchema16,
   "1.7": BomSchema17,
 };
+
+// The latest entry of supportedSpecVersions; the ?? is only for the
+// noUncheckedIndexedAccess index type — the array is a non-empty const.
+const latestSupportedSpecVersion =
+  supportedSpecVersions[supportedSpecVersions.length - 1] ?? "1.7";
+
+const bomMessageTypeNames = new Set<string>(
+  (Object.values(bomSchemas) as AnyBomSchema[]).map(
+    (schema) => schema.typeName,
+  ),
+);
 
 const SUPPORTED_BINARY_READ_ORDER = [...supportedSpecVersions].reverse();
 
@@ -323,7 +335,18 @@ function mergeBomObjectListEntries(entries: JsonLike[]): JsonLike {
 
 const specVersionCache = new Map<string | number, SupportedSpecVersion>();
 
-function normalizeSpecVersion(
+/**
+ * Normalizes a CycloneDX spec version to one of {@link supportedSpecVersions}.
+ * Accepts the canonical strings ("1.5", "1.6", "1.7") plus the spellings seen
+ * in the wild: `v`-prefixed ("v1.6"), numeric (1.6), and patch-suffixed
+ * ("1.6.0"). Throws for anything else.
+ *
+ * Exported because every consumer that has to answer "can I proto-serialize
+ * this BOM?" needs the same parsing rules; without it, consumers re-implement
+ * version normalization (cdxgen carries `toCycloneDxSpecVersionString` for
+ * exactly this reason).
+ */
+export function normalizeSpecVersion(
   specVersion: string | number,
 ): SupportedSpecVersion {
   const cached = specVersionCache.get(specVersion);
@@ -346,6 +369,27 @@ function normalizeSpecVersion(
   throw new Error(
     `Unsupported CycloneDX spec version: ${String(specVersion)}. Supported versions: ${supportedSpecVersions.join(", ")}`,
   );
+}
+
+/**
+ * Non-throwing companion to {@link normalizeSpecVersion}: `true` when the value
+ * is a string or number that normalizes to a supported spec version. Consumers
+ * gating protobuf operations on version support (cdxgen's
+ * `isProtoSupportedSpecVersion`) can delegate to this instead of matching
+ * against `supportedSpecVersions` by hand.
+ */
+export function isSupportedSpecVersion(
+  specVersion: unknown,
+): specVersion is string | number {
+  if (typeof specVersion !== "string" && typeof specVersion !== "number") {
+    return false;
+  }
+  try {
+    normalizeSpecVersion(specVersion);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function readSpecVersion(value: BomVersionCarrier): SupportedSpecVersion {
@@ -1226,6 +1270,69 @@ export function parseBomJsonString(
   return parseBomJson(parsed, options);
 }
 
+/**
+ * Type guard for a decoded BOM message produced by this library (any of the
+ * three supported spec versions). Checks `$typeName` against the known Bom
+ * type names rather than duck-typing shape, so a decoded `Bom` passes while an
+ * arbitrary protobuf message, a plain object, or a hand-crafted look-alike
+ * does not. Consumers accepting "already decoded?" inputs (cdxgen's
+ * `resolveBomMessage`) can branch on this instead of probing
+ * `$typeName`/`specVersion` themselves.
+ */
+export function isBomMessage(value: unknown): value is AnyBom {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const carrier = value as { $typeName?: unknown };
+  return (
+    typeof carrier.$typeName === "string" &&
+    bomMessageTypeNames.has(carrier.$typeName)
+  );
+}
+
+/**
+ * Coerces any commonly-seen BOM input into a decoded message, so callers need
+ * one entry point instead of choosing between `parseBomJson`,
+ * `decodeBomJson`, and `createBom` themselves:
+ *
+ * - a decoded BOM message is returned unchanged (see {@link isBomMessage});
+ * - a JSON *string* is `JSON.parse`d and re-dispatched;
+ * - a canonical JSON object carrying `specVersion`/`spec_version` is parsed
+ *   with the matching schema (throws for unsupported versions);
+ * - a canonical JSON object *without* a version is decoded with `specVersion`
+ *   (defaults to the latest supported version);
+ * - anything else (null, primitives, arrays) yields an empty BOM created for
+ *   `specVersion`, mirroring how cdxgen treats absent input.
+ *
+ * `options` are protobuf-es JSON read options passed through to the underlying
+ * decode (cdxgen uses `{ ignoreUnknownFields: true }`).
+ */
+export function toBomMessage(
+  value: unknown,
+  specVersion?: string | number,
+  options?: Partial<JsonReadOptions>,
+): AnyBom {
+  const fallback = specVersion ?? latestSupportedSpecVersion;
+
+  if (isBomMessage(value)) {
+    return value;
+  }
+  if (typeof value === "string" || value instanceof String) {
+    return toBomMessage(JSON.parse(`${value}`), fallback, options);
+  }
+  if (isJsonRecord(value)) {
+    const carrier = value as BomVersionCarrier;
+    if (
+      carrier.specVersion !== undefined ||
+      carrier.spec_version !== undefined
+    ) {
+      return parseBomJson(value as JsonValue, options);
+    }
+    return decodeBomJson(fallback, value as JsonValue, options);
+  }
+  return createBom(fallback);
+}
+
 export function encodeBomBinary(
   bom: AnyBom,
   options?: Partial<BinaryWriteOptions>,
@@ -1327,6 +1434,62 @@ export function parseBomBinary(
   );
 }
 
+/**
+ * Encodes a BOM as a base64 string of its protobuf binary form — the same
+ * bytes {@link encodeBomBinary} produces, in a transport that survives JSON
+ * documents, OCI labels, in-toto predicates, environment variables, and other
+ * contexts that cannot carry raw bytes. Uses protobuf-es' own base64 codec
+ * (`@bufbuild/protobuf/wire`) rather than Node's `Buffer`, so the main entry
+ * stays usable from browsers and edge runtimes.
+ */
+export function encodeBomBase64(
+  bom: AnyBom,
+  options?: Partial<BinaryWriteOptions>,
+): string {
+  return base64Encode(encodeBomBinary(bom, options));
+}
+
+export function decodeBomBase64(
+  specVersion: "1.5",
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): BomByVersion["1.5"];
+export function decodeBomBase64(
+  specVersion: "1.6",
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): BomByVersion["1.6"];
+export function decodeBomBase64(
+  specVersion: "1.7",
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): BomByVersion["1.7"];
+export function decodeBomBase64(
+  specVersion: string | number,
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): AnyBom;
+export function decodeBomBase64(
+  specVersion: string | number,
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): AnyBom {
+  return decodeBomBinary(specVersion, base64Decode(base64), options);
+}
+
+/**
+ * Decodes a base64 protobuf BOM whose spec version is not known ahead of time,
+ * mirroring {@link parseBomBinary}: the embedded `spec_version` field is read
+ * first and the matching schema decodes the payload. Throws for inputs that no
+ * supported schema can decode.
+ */
+export function parseBomBase64(
+  base64: string,
+  options?: Partial<BinaryReadOptions>,
+): AnyBom {
+  return parseBomBinary(base64Decode(base64), options);
+}
+
 export function encodeBomJsonString(
   bom: AnyBom,
   options?: Partial<JsonWriteStringOptions>,
@@ -1344,14 +1507,92 @@ export type BomConversionResult = {
 };
 
 /**
+ * Canonical JSON paths whose cardinality changes between spec versions. Both
+ * were single objects in 1.5 and became arrays in 1.6 (confirmed against the
+ * upstream JSON schemas: bom-1.5 `metadata.licenses` refs a single
+ * `licenseChoice`, while 1.6 refs the array form). Nothing changes on the
+ * 1.6 <-> 1.7 boundary.
+ *
+ * A canonical JSON produced for one side of that boundary cannot be decoded by
+ * the other: protobuf-es rejects an object where the target schema expects a
+ * list ("expected Array, got object") and an array where it expects a single
+ * message. convertBom therefore reshapes these two paths before decoding —
+ * wrapping on upgrade, keeping the first entry on downgrade — so the dropped
+ * data surfaces as warnings instead of an exception.
+ */
+const SINGULAR_BEFORE_1_6_PATHS = {
+  metadataLicenses: "licenses",
+  componentEvidenceIdentity: "identity",
+} as const;
+
+/**
+ * Copy-on-write reshape of {@link SINGULAR_BEFORE_1_6_PATHS} for a decode into
+ * `target`. Values are inspected by shape, not by source version, so the
+ * reshape is idempotent and also repairs inputs produced by older tooling:
+ * an object becomes `[object]` when the target expects a list (1.6+), and an
+ * array collapses to its first entry when the target expects a single object
+ * (1.5; an empty array drops the key). Untouched subtrees are shared, never
+ * deep-copied, and `source` itself is never mutated — the caller still diffs
+ * against it to compute warnings.
+ */
+function reshapeCardinalityBoundaries(
+  source: JsonRecord,
+  target: SupportedSpecVersion,
+): JsonRecord {
+  const singularInTarget = target === "1.5";
+
+  const reshape = (value: JsonLike): JsonLike => {
+    if (singularInTarget) {
+      return Array.isArray(value) ? value[0] : value;
+    }
+    return isJsonRecord(value) ? [value] : value;
+  };
+
+  const result: JsonRecord = { ...source };
+  const { metadata } = source;
+  if (isJsonRecord(metadata) && metadata.licenses !== undefined) {
+    result.metadata = {
+      ...metadata,
+      [SINGULAR_BEFORE_1_6_PATHS.metadataLicenses]: reshape(metadata.licenses),
+    };
+  }
+  const { components } = source;
+  if (Array.isArray(components)) {
+    result.components = components.map((component) => {
+      if (!isJsonRecord(component)) {
+        return component;
+      }
+      const { evidence } = component;
+      if (!isJsonRecord(evidence) || evidence.identity === undefined) {
+        return component;
+      }
+      return {
+        ...component,
+        evidence: {
+          ...evidence,
+          [SINGULAR_BEFORE_1_6_PATHS.componentEvidenceIdentity]: reshape(
+            evidence.identity,
+          ),
+        },
+      };
+    });
+  }
+  return result;
+}
+
+/**
  * Converts a BOM to a different CycloneDX spec version (1.5 <-> 1.6 <->
  * 1.7, up or down). Works by round-tripping through canonical JSON: the source
  * is encoded, the `specVersion` is rewritten, and the target schema decodes it
  * with `ignoreUnknownFields` so fields the target does not know are silently
- * dropped rather than throwing. A recursive key diff produces human-readable
- * `warnings` listing the field paths that were lost, so downgrades are
- * lossy-but-visible rather than silent. Upgrades typically produce no warnings
- * because every lower-version field exists in the higher schema.
+ * dropped rather than throwing. Fields that change cardinality between
+ * versions (`metadata.licenses`, `components[].evidence.identity`, singular
+ * in 1.5 and a list since 1.6) are reshaped first: wrapped on upgrade,
+ * collapsed to their first entry on downgrade. A recursive key diff produces
+ * human-readable `warnings` listing the field paths that were lost — including
+ * collapsed list siblings — so downgrades are lossy-but-visible rather than
+ * silent. Upgrades typically produce no warnings because every lower-version
+ * field exists in the higher schema.
  */
 export function convertBom(
   bom: AnyBom,
@@ -1359,7 +1600,11 @@ export function convertBom(
 ): BomConversionResult {
   const target = normalizeSpecVersion(targetSpecVersion);
   const sourceJson = encodeBomJson(bom) as JsonRecord;
-  const candidate: JsonRecord = { ...sourceJson, specVersion: target };
+  // Reshape the singular<->list boundary fields (metadata.licenses,
+  // components[].evidence.identity) so the target schema can decode the
+  // candidate at all; the original sourceJson stays untouched for the diff.
+  const candidate = reshapeCardinalityBoundaries(sourceJson, target);
+  candidate.specVersion = target;
   delete candidate.spec_version;
 
   const converted = decodeBomJson(target, candidate as JsonValue, {
@@ -1391,16 +1636,39 @@ function collectDroppedPaths(
   dropped: Set<string>,
 ): void {
   if (Array.isArray(source)) {
-    if (!Array.isArray(target)) {
+    if (Array.isArray(target)) {
+      const shared = Math.min(source.length, target.length);
+      for (let index = 0; index < shared; index += 1) {
+        collectDroppedPaths(source[index], target[index], `${path}[]`, dropped);
+      }
       return;
     }
-    const shared = Math.min(source.length, target.length);
-    for (let index = 0; index < shared; index += 1) {
-      collectDroppedPaths(source[index], target[index], `${path}[]`, dropped);
+    if (isJsonRecord(target)) {
+      // The target schema carries a single entry where the source had a list
+      // (the 1.5 singular side of a cardinality boundary, e.g.
+      // `evidence.identity`): only index 0 can survive, so the diff continues
+      // against that entry and every sibling is reported as dropped.
+      const [first] = source;
+      if (first !== undefined) {
+        collectDroppedPaths(first, target, `${path}[]`, dropped);
+      }
+      for (let index = 1; index < source.length; index += 1) {
+        dropped.add(`${path}[${index}]`);
+      }
     }
     return;
   }
   if (!isJsonRecord(source) || !isJsonRecord(target)) {
+    // The mirror image of the collapse above: the source carried a single
+    // entry and the target wraps it in a list (upgrade across a cardinality
+    // boundary). Diff against the surviving first element instead of flagging
+    // every source key as dropped.
+    if (isJsonRecord(source) && Array.isArray(target)) {
+      const [first] = target;
+      if (isJsonRecord(first)) {
+        collectDroppedPaths(source, first, path, dropped);
+      }
+    }
     return;
   }
   for (const key of Object.keys(source)) {

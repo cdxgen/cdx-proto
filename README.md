@@ -61,9 +61,13 @@ const schema = getBomSchema(parsed.specVersion);
 - `parseBomJson(json)` and `parseBomJsonString(json)` auto-detect the schema from `specVersion` / `spec_version`.
 - `decodeBomBinary(specVersion, bytes)` decodes a protobuf BOM when the schema version is known.
 - `encodeBomBinary(bom)`, `encodeBomJson(bom)`, and `encodeBomJsonString(bom)` choose the correct schema from the BOM itself.
-- `convertBom(bom, targetSpecVersion)` cross-converts between spec versions. Returns `{ bom, warnings }` where `warnings` lists field paths dropped during a lossy downgrade. Upgrades typically produce no warnings.
+- `toBomMessage(value, specVersion?, options?)` is the single entry point for "turn whatever I have into a BOM message": decoded messages pass through (see `isBomMessage`), JSON strings are parsed, canonical JSON objects are dispatched by embedded version (or the fallback version, which defaults to the latest supported), and absent input yields an empty BOM. This replaces the input-dispatch re-implementations consumers previously carried.
+- `isBomMessage(value)` is a type guard for a decoded BOM message of any supported spec version, keyed on `$typeName` rather than duck-typed shape.
+- `convertBom(bom, targetSpecVersion)` cross-converts between spec versions. Returns `{ bom, warnings }` where `warnings` lists field paths dropped during a lossy downgrade. Fields that change cardinality between versions (`metadata.licenses` and `components[].evidence.identity`, singular in 1.5 and an array since 1.6) are reshaped automatically — wrapped on upgrade, collapsed to their first entry on downgrade with the dropped siblings reported in `warnings` — so conversions across the 1.5/1.6 boundary no longer throw. Upgrades typically produce no warnings.
 - `bomStats(bom)` returns component/dependency counts and JSON/binary byte sizes with the compression ratio.
 - `detectBomSpecVersion(value)` reads the spec version from a BOM object or message.
+- `normalizeSpecVersion(specVersion)` normalizes `"v1.6"`, `1.6`, and `"1.6.0"` spellings to a canonical supported version, throwing for anything else; `isSupportedSpecVersion(value)` is its non-throwing probe.
+- `encodeBomBase64(bom)` produces a base64 string of the protobuf binary, for contexts that cannot carry raw bytes (OCI labels, in-toto predicates, environment variables). `decodeBomBase64(specVersion, string)` decodes with a known version and `parseBomBase64(string)` auto-detects it, mirroring the binary helpers.
 
 ### Canonical JSON guarantees
 
@@ -139,11 +143,37 @@ import { BomSchema as BomSchema16 } from "@cdxgen/cdx-proto/v1.6";
 import { BomSchema as BomSchema17 } from "@cdxgen/cdx-proto/v1.7";
 ```
 
+### Node-only file helpers
+
+`@cdxgen/cdx-proto/node` adds filesystem convenience wrappers without
+polluting the main (browser-safe) entry with `node:` imports:
+
+```js
+import {
+  isProtoBomFile,
+  readBomFile,
+  writeBomFile,
+} from "@cdxgen/cdx-proto/node";
+
+// Format is auto-detected from the extension: `.json` for canonical JSON,
+// `.b64`/`.base64` for base64 protobuf payloads, and anything else
+// (`.cdx`, `.cdx.bin`, `.proto`, `.bin`, ...) as raw protobuf binary.
+const bom = readBomFile("bom.cdx");
+const bomJson = readBomFile("bom.cdx", { asJson: true });
+
+writeBomFile("bom.json", bom); // pretty canonical JSON
+writeBomFile("bom.cdx", bomJson); // coerced back to a message, then binary
+writeBomFile("bom.b64", bom); // base64 protobuf payload
+
+isProtoBomFile("bom.CDX.BIN"); // true — the extension list lives here once
+```
+
 ## CLI
 
 The package ships a zero-dependency `cdx-proto` CLI for converting, inspecting,
 and validating BOMs from the shell. The format is auto-detected by file
-extension (`.json` for canonical JSON, anything else for protobuf binary).
+extension (`.json` for canonical JSON, `.b64`/`.base64` for base64 protobuf,
+anything else for protobuf binary).
 
 ```sh
 # Convert JSON to protobuf binary (~2x smaller for typical BOMs)
@@ -151,6 +181,9 @@ npx cdx-proto convert bom.json bom.bin
 
 # Downgrade a 1.7 BOM to 1.5, warning about dropped fields
 npx cdx-proto convert bom.json bom-1.5.json --to 1.5
+
+# Convert to a base64 payload for embedding in labels or predicates
+npx cdx-proto convert bom.json bom.b64
 
 # Inspect component/dependency counts and byte sizes
 npx cdx-proto inspect bom.bin
