@@ -167,6 +167,83 @@ test("convertBom survives a double hop over the 1.5/1.6 boundary", () => {
   assert.deepEqual(encodeBomJson(backDown.bom), encodeBomJson(bom15));
 });
 
+// A component — and therefore evidence.identity — is reachable from several
+// places besides top-level components[]. An earlier implementation reshaped
+// only that one path, so every BOM with a metadata.component or a nested
+// component (i.e. nearly every real one) still threw on conversion.
+const identity16 = [
+  { field: "purl", confidence: 1 },
+  { field: "name", confidence: 0.5 },
+];
+const identity15 = { field: "purl", confidence: 1 };
+const componentAt = (identity) => ({
+  type: "library",
+  name: "nested",
+  evidence: { identity },
+});
+const nestedShapes = (identity) => ({
+  "nested components[]": {
+    components: [
+      { type: "application", name: "outer", components: [componentAt(identity)] },
+    ],
+  },
+  "metadata.component": {
+    metadata: { component: { ...componentAt(identity), type: "application" } },
+  },
+  "metadata.component subtree": {
+    metadata: {
+      component: {
+        type: "application",
+        name: "root",
+        components: [componentAt(identity)],
+      },
+    },
+  },
+  "metadata.tools.components[]": {
+    metadata: { tools: { components: [componentAt(identity)] } },
+  },
+  "formulation[].components[]": {
+    formulation: [{ components: [componentAt(identity)] }],
+  },
+});
+
+for (const [label, shape] of Object.entries(nestedShapes(identity16))) {
+  test(`convertBom downgrades evidence.identity at ${label}`, () => {
+    const bom = parseBomJson({
+      bomFormat: "CycloneDX",
+      specVersion: "1.6",
+      version: 1,
+      ...shape,
+    });
+    const result = convertBom(bom, "1.5");
+    assert.equal(result.bom.specVersion, "1.5");
+    // The collapsed sibling must be reported, not silently discarded.
+    assert.ok(
+      result.warnings.some((warning) => warning.includes("identity[1]")),
+      `expected a dropped-sibling warning, got ${JSON.stringify(result.warnings)}`,
+    );
+  });
+}
+
+for (const [label, shape] of Object.entries(nestedShapes(identity15))) {
+  test(`convertBom upgrades evidence.identity at ${label}`, () => {
+    const bom = parseBomJson({
+      bomFormat: "CycloneDX",
+      specVersion: "1.5",
+      version: 1,
+      ...shape,
+    });
+    const result = convertBom(bom, "1.6");
+    assert.equal(result.bom.specVersion, "1.6");
+    assert.deepEqual(result.warnings, []);
+    // Round-tripping back down must reproduce the original document.
+    assert.deepEqual(
+      encodeBomJson(convertBom(result.bom, "1.5").bom),
+      encodeBomJson(bom),
+    );
+  });
+}
+
 test("normalizeSpecVersion accepts canonical, v-prefixed, numeric, and patch spellings", () => {
   assert.equal(normalizeSpecVersion("1.6"), "1.6");
   assert.equal(normalizeSpecVersion("v1.5"), "1.5");

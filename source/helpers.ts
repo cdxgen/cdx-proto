@@ -1520,13 +1520,74 @@ export type BomConversionResult = {
  * wrapping on upgrade, keeping the first entry on downgrade — so the dropped
  * data surfaces as warnings instead of an exception.
  */
-const SINGULAR_BEFORE_1_6_PATHS = {
-  metadataLicenses: "licenses",
-  componentEvidenceIdentity: "identity",
-} as const;
+/**
+ * `evidence.identity` is reachable from every place a `Component` can appear,
+ * and a canonical BOM nests components freely: `components[].components[]`,
+ * `metadata.component` (and its own subtree), `metadata.tools.components[]`,
+ * `formulation[].components[]`, and their equivalents in later specs. Rather
+ * than enumerate those paths — the previous approach, which silently missed
+ * every one but top-level `components[]` — the reshape walks the document and
+ * fixes any `evidence` record it finds. `evidence` belongs only to `Component`
+ * in CycloneDX, and the reshape is shape-driven and idempotent, so a stray
+ * match cannot corrupt a correctly-shaped value.
+ *
+ * `metadata.licenses` is handled separately because `licenses` is *not* a
+ * cardinality boundary anywhere else: on a component it is a list in every
+ * supported spec version, so a blind walk would wrongly collapse it.
+ */
+function reshapeComponentEvidence(
+  value: JsonLike,
+  reshape: (value: JsonLike) => JsonLike,
+): JsonLike {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const mapped = value.map((entry) => {
+      const next = reshapeComponentEvidence(entry, reshape);
+      changed ||= next !== entry;
+      return next;
+    });
+    return changed ? mapped : value;
+  }
+  if (!isJsonRecord(value)) {
+    return value;
+  }
+
+  let result = value;
+  const assign = (key: string, next: JsonLike): void => {
+    if (result === value) {
+      result = { ...value };
+    }
+    result[key] = next;
+  };
+
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      key === "evidence" &&
+      isJsonRecord(child) &&
+      child.identity !== undefined
+    ) {
+      const identity = reshape(child.identity);
+      if (identity !== child.identity) {
+        const next = { ...child, identity };
+        // An empty list collapses to nothing: drop the key rather than hand
+        // the decoder an explicit `undefined`.
+        if (identity === undefined) {
+          delete next.identity;
+        }
+        assign(key, next);
+      }
+      continue;
+    }
+    const next = reshapeComponentEvidence(child, reshape);
+    if (next !== child) {
+      assign(key, next);
+    }
+  }
+  return result;
+}
 
 /**
- * Copy-on-write reshape of {@link SINGULAR_BEFORE_1_6_PATHS} for a decode into
+ * Copy-on-write reshape of the singular/list boundary fields for a decode into
  * `target`. Values are inspected by shape, not by source version, so the
  * reshape is idempotent and also repairs inputs produced by older tooling:
  * an object becomes `[object]` when the target expects a list (1.6+), and an
@@ -1548,34 +1609,19 @@ function reshapeCardinalityBoundaries(
     return isJsonRecord(value) ? [value] : value;
   };
 
-  const result: JsonRecord = { ...source };
-  const { metadata } = source;
+  const walked = reshapeComponentEvidence(source, reshape) as JsonRecord;
+  const result: JsonRecord = walked === source ? { ...source } : walked;
+
+  const metadata = result.metadata;
   if (isJsonRecord(metadata) && metadata.licenses !== undefined) {
-    result.metadata = {
-      ...metadata,
-      [SINGULAR_BEFORE_1_6_PATHS.metadataLicenses]: reshape(metadata.licenses),
-    };
-  }
-  const { components } = source;
-  if (Array.isArray(components)) {
-    result.components = components.map((component) => {
-      if (!isJsonRecord(component)) {
-        return component;
+    const licenses = reshape(metadata.licenses);
+    if (licenses !== metadata.licenses) {
+      const next = { ...metadata, licenses };
+      if (licenses === undefined) {
+        delete next.licenses;
       }
-      const { evidence } = component;
-      if (!isJsonRecord(evidence) || evidence.identity === undefined) {
-        return component;
-      }
-      return {
-        ...component,
-        evidence: {
-          ...evidence,
-          [SINGULAR_BEFORE_1_6_PATHS.componentEvidenceIdentity]: reshape(
-            evidence.identity,
-          ),
-        },
-      };
-    });
+      result.metadata = next;
+    }
   }
   return result;
 }
@@ -1586,9 +1632,12 @@ function reshapeCardinalityBoundaries(
  * is encoded, the `specVersion` is rewritten, and the target schema decodes it
  * with `ignoreUnknownFields` so fields the target does not know are silently
  * dropped rather than throwing. Fields that change cardinality between
- * versions (`metadata.licenses`, `components[].evidence.identity`, singular
- * in 1.5 and a list since 1.6) are reshaped first: wrapped on upgrade,
- * collapsed to their first entry on downgrade. A recursive key diff produces
+ * versions (`metadata.licenses`, and `evidence.identity` on a component
+ * anywhere in the document — singular in 1.5, a list since 1.6) are reshaped
+ * first: wrapped on upgrade, collapsed to their first entry on downgrade. The
+ * `evidence.identity` reshape is recursive, so nested `components[]`,
+ * `metadata.component`, `metadata.tools.components[]` and
+ * `formulation[].components[]` are covered. A recursive key diff produces
  * human-readable `warnings` listing the field paths that were lost — including
  * collapsed list siblings — so downgrades are lossy-but-visible rather than
  * silent. Upgrades typically produce no warnings because every lower-version
