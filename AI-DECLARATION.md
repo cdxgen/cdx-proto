@@ -36,4 +36,4 @@ git-ai log                            # git log with AI stats for each commit
 git-ai show <commit>                  # the raw note for a commit
 ```
 
-Not every commit has a note. Older commits, commits made outside a tracked agent session, and commits whose note was not carried over when a pull request was merged have none. For those, `git-ai blame` shows the git author and `git-ai stats` reports the lines as untracked. A missing note means no attribution was recorded, not that a person wrote the code.
+Not every commit has a note, for example commits from before git-ai was adopted or made outside a tracked agent session. For those, `git-ai blame` shows the git author and `git-ai stats` reports the lines as untracked. A missing note means no attribution was recorded, not that a person wrote the code.
