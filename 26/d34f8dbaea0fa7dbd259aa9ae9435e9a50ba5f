@@ -1,0 +1,19 @@
+.github/workflows/ci.yml
+  s_bd1c881a2f8764::t_7b5bc650816c03 60-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "26d34f8dbaea0fa7dbd259aa9ae9435e9a50ba5f",
+  "prompts": {},
+  "sessions": {
+    "s_bd1c881a2f8764": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "sess_aa17957f-d67e-4378-8c2b-4320b226ff12",
+        "model": "GLM-5.3"
+      },
+      "human_author": "Team AppThreat <cloud@appthreat.com>"
+    }
+  }
+}
