@@ -57,3 +57,20 @@ jobs:
         run: npm run build
       - name: Verify packed artifact
         run: npm run pack:check
+
+  # Single stable check name that covers every matrix leg plus pack-verification.
+  # Branch protection requires this name, so the Node matrix can change without
+  # editing required checks. Skipped upstream jobs still fail this one.
+  ci-ok:
+    needs: [build-and-test, pack-verification]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every build-and-test leg and pack verification to pass
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          if echo "$RESULTS" | grep -Eq 'failure|cancelled'; then
+            echo "CI did not pass: $RESULTS" >&2
+            exit 1
+          fi
