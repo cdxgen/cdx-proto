@@ -1,0 +1,3 @@
+# Required review for changes to the GitHub Actions lockfile and the check
+# that verifies it.
+.github/workflows/actions.lock @prabhu
